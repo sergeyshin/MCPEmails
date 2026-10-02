@@ -12,7 +12,7 @@
 # ============================================================
 
 COMPOSE ?= docker compose
-DENO_IMG ?= denoland/deno:2.1.4
+DENO_IMG ?= denoland/deno:2.9.7
 
 .PHONY: help setup up down logs ps restart build provision key keys inboxes revoke dispatch psql destroy
 

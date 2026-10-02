@@ -2,7 +2,7 @@
 #
 # This root-level Dockerfile lets MCP directories such as Glama build and
 # evaluate the open-source server directly from the repository root.
-FROM denoland/deno:2.1.4
+FROM denoland/deno:2.9.7
 
 WORKDIR /app
 
