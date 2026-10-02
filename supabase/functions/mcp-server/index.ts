@@ -1,6 +1,6 @@
-import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import "jsr:@supabase/functions-js@2.117.2/edge-runtime.d.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.117.2";
 import {
   ImapAuthError,
   ImapClient,
@@ -473,6 +473,9 @@ import {
 // below never apply there. The non-introspection fallback stays empty on
 // purpose: a production deploy missing its env must still fail loudly.
 const INTROSPECTION_ONLY = Deno.env.get("MCP_INTROSPECTION_ONLY") === "1";
+// Single-owner self-host mode: keep mail/auth/rate-limit semantics, but skip
+// hosted SaaS billing, analytics, OAuth-client telemetry and MCP Apps rollout gates.
+const SELF_HOSTED = Deno.env.get("SELF_HOSTED") === "1";
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ??
   (INTROSPECTION_ONLY ? "http://127.0.0.1:1" : "");
@@ -2140,6 +2143,15 @@ interface PlanQuotaResult {
 async function checkPlanQuota(
   workspaceId: string,
 ): Promise<PlanQuotaResult> {
+  if (SELF_HOSTED) {
+    return {
+      allowed: true,
+      plan: "selfhost",
+      perMinuteLimit: Number.MAX_SAFE_INTEGER,
+      usedThisMinute: 0,
+      retryAfterSeconds: 0,
+    };
+  }
   // The window count (step 2) needs nothing from the workspace row, so it is
   // issued first and overlaps the two lookups below instead of queueing behind
   // them. It is a read: when a lookup fails open the answer is simply unused.
@@ -2803,6 +2815,7 @@ async function writeActionUsage(
   status: "success" | "error" | "rate_limited",
   reservationId: string | null = null,
 ): Promise<void> {
+  if (SELF_HOSTED) return;
   if (reservationId) {
     const { error } = await supabase.rpc("finalize_action_usage_reservation", {
       p_reservation_id: reservationId,
@@ -3155,7 +3168,7 @@ function usageLimitResult(
  * still actionLimitResponse, on the resolved operation.
  */
 function mayMeterToolCall(toolName: unknown): boolean {
-  if (typeof toolName !== "string" || Deno.env.get("USAGE_ENFORCEMENT_DISABLED") === "true") return false;
+  if (SELF_HOSTED || typeof toolName !== "string" || Deno.env.get("USAGE_ENFORCEMENT_DISABLED") === "true") return false;
   return BILLABLE_TOOL_NAMES.has(toolName) || Object.hasOwn(CONSOLIDATED_BY_NAME, toolName);
 }
 
@@ -3168,7 +3181,7 @@ async function actionLimitResponse(
   // Kill switch, not a feature flag: enforcement is ON unless something says
   // otherwise, so a missing or mistyped variable cannot silently disable the
   // only thing standing between us and an unbounded provider bill.
-  if (Deno.env.get("USAGE_ENFORCEMENT_DISABLED") === "true" || !BILLABLE_TOOL_NAMES.has(toolName)) return { response: null, reservationId: null };
+  if (SELF_HOSTED || Deno.env.get("USAGE_ENFORCEMENT_DISABLED") === "true" || !BILLABLE_TOOL_NAMES.has(toolName)) return { response: null, reservationId: null };
   const reservation = await reserveBillableAction(workspaceId, toolName, preloadedAllowance);
   switch (reservation.outcome) {
     case "unmetered":
@@ -3189,6 +3202,7 @@ function analyticsClient(userAgent: string | null): string {
 }
 
 async function markFirstProductUse(workspaceId: string, apiKeyId: string, inboxId: string | null, toolName: string, userAgent: string | null): Promise<void> {
+  if (SELF_HOSTED) return;
   const { data: inbox } = inboxId ? await supabase.from("inboxes").select("provider, service").eq("id", inboxId).maybeSingle() : { data: null };
   const rawProvider = inbox?.service && inbox.service !== "generic" ? inbox.service : inbox?.provider ?? "unknown";
   const provider = rawProvider === "imap" || rawProvider === "generic" ? "generic_imap" : rawProvider;
@@ -3271,6 +3285,7 @@ async function recordClientCapabilities(
   clientInfo: InitializeParams["clientInfo"],
   capabilities: InitializeParams["capabilities"],
 ): Promise<void> {
+  if (SELF_HOSTED) return;
   // The conflict target columns are NOT NULL in the table: NULLs never compare
   // equal in a unique index, so a client that omits clientInfo would insert an
   // unbounded number of near-identical rows instead of updating one.
@@ -3350,6 +3365,7 @@ async function recordClientCapabilities(
  * successful call. Fails closed to `false`, which is today's 403.
  */
 async function isOpenAiClientKey(apiKey: ApiKeyRow): Promise<boolean> {
+  if (SELF_HOSTED) return false;
   // The key's own name first: free, and set by our OAuth issuer from the
   // client's registration (`OAuth: ChatGPT`). See isOpenAiOAuthKeyName.
   if (isOpenAiOAuthKeyName(apiKey.name)) return true;
@@ -16498,6 +16514,7 @@ interface QueuedApproval {
  * — today's behaviour — on any error.
  */
 async function readSendReviewMode(inboxId: string): Promise<string> {
+  if (SELF_HOSTED) return "off";
   const { data, error } = await supabase
     .from("inboxes")
     .select("send_review_mode")
@@ -22401,6 +22418,7 @@ async function outlookBulkFlag(
  * stop deleting mail and report success at having "previewed" it.
  */
 async function readBulkReviewMode(inboxId: string): Promise<string> {
+  if (SELF_HOSTED) return "off";
   const { data, error } = await supabase
     .from("inboxes")
     .select("bulk_review_mode")
@@ -22456,7 +22474,7 @@ async function keyReviewCardGates(
   // and skipping its queries would be answering a question nobody asked. That
   // is what lets `reachable-inbox.test.ts` drive these rollups for real in the
   // same process that `mcp-app-resources.test.ts` uses introspection mode for.
-  if (INTROSPECTION_ONLY && db === supabase) return denied;
+  if ((INTROSPECTION_ONLY || SELF_HOSTED) && db === supabase) return denied;
   // The draft-editor gate is a WORKSPACE flag, not an inbox opt-in, so it
   // cannot join the `.or()` below and needs its own read. Issued in parallel
   // rather than awaited in sequence, for the reason in the note above: this
@@ -25296,6 +25314,7 @@ async function workspaceDraftEditorGate(
   // Fails closed in BOTH fields. `rolledOut: false` is the pre-feature
   // behaviour, not a degraded mode. `hidden: true` only ever withholds a card.
   const closed = { rolledOut: false, hidden: true };
+  if (SELF_HOSTED && db === supabase) return closed;
   // Same guard as `keyReviewCardGates`: only the DEFAULT client is the one
   // introspection mode leaves pointing at nothing.
   if (INTROSPECTION_ONLY && db === supabase) return closed;
@@ -25376,7 +25395,7 @@ async function workspaceDraftEditorEnabled(
  * state every customer should be in.
  */
 async function workspaceCardDiagnostics(workspaceId: string): Promise<boolean> {
-  if (INTROSPECTION_ONLY) return false;
+  if (INTROSPECTION_ONLY || SELF_HOSTED) return false;
   try {
     const { data, error } = await supabase
       .from("workspaces")
@@ -25416,7 +25435,7 @@ async function workspaceCardDiagnostics(workspaceId: string): Promise<boolean> {
  * exactly what an unreadable preference should fall back to.
  */
 async function readInboxDraftEditorHidden(inboxId: string): Promise<boolean> {
-  if (INTROSPECTION_ONLY) return true;
+  if (INTROSPECTION_ONLY || SELF_HOSTED) return true;
   try {
     const { data, error } = await supabase
       .from("inboxes")
@@ -31341,6 +31360,16 @@ function handleRequest(req: Request): Promise<Response> {
 }
 
 async function handleMeteredRequest(req: Request): Promise<Response> {
+  const reqUrl = new URL(req.url);
+
+  // Cheap, non-sensitive health endpoint for Railway.
+  if (req.method === "GET" && reqUrl.pathname === "/health") {
+    return new Response("ok\n", {
+      status: 200,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+
   // ── CORS preflight ────────────────────────────────────────────────────────
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -31356,7 +31385,6 @@ async function handleMeteredRequest(req: Request): Promise<Response> {
   // there. That is one character away from the scheduled-send dispatcher
   // swallowing every automation run. Any new route ending in "dispatch" must be
   // re-checked against this predicate.
-  const reqUrl = new URL(req.url);
   if (reqUrl.pathname.endsWith("/dispatch")) {
     if (req.method !== "POST") {
       return new Response(
@@ -31446,10 +31474,41 @@ async function handleMeteredRequest(req: Request): Promise<Response> {
     startedAtMs: Date.now(),
   };
 
-  // ── Parse JSON body ───────────────────────────────────────────────────────
+  // ── Parse JSON body with a hard byte ceiling ──────────────────────────────
+  // Inline attachments are documented at 10 MB total; base64 expansion plus
+  // JSON envelope still fits comfortably below 16 MiB. Enforce the ceiling
+  // while streaming as well as from Content-Length, so chunked requests cannot
+  // bypass it and force the isolate to buffer an unbounded body.
+  const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
+  const declaredLength = Number(req.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) {
+    return new Response(JSON.stringify({ error: "Request body too large" }), {
+      status: 413,
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+    });
+  }
+
   let rawBody: unknown;
   try {
-    const text = await req.text();
+    if (!req.body) throw new SyntaxError("Empty body");
+    const reader = req.body.getReader();
+    const decoder = new TextDecoder();
+    let totalBytes = 0;
+    let text = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_REQUEST_BODY_BYTES) {
+        await reader.cancel("request body too large").catch(() => {});
+        return new Response(JSON.stringify({ error: "Request body too large" }), {
+          status: 413,
+          headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        });
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
     if (text.length === 0) {
       throw new SyntaxError("Empty body");
     }

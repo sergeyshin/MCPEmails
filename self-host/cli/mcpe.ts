@@ -148,7 +148,7 @@ async function getClient() {
   const url = Deno.env.get("SUPABASE_URL");
   const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!url || !key) die("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set (start the stack, then use `make`).");
-  const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2");
+  const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2.117.2");
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
@@ -234,10 +234,12 @@ async function cmdProvisionInbox(flags: Record<string, string | string[]>) {
       imap_host: imapHost,
       imap_port: imapPort,
       imap_tls: true,
+      imap_security: "tls",
       imap_username: username,
       smtp_host: smtpHost,
       smtp_port: smtpPort,
       smtp_tls: true,
+      smtp_security: smtpPort === 587 ? "starttls" : "tls",
       imap_password: encrypted,
       oauth_access_token: null,
       oauth_refresh_token: null,

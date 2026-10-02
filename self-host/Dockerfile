@@ -10,6 +10,8 @@ FROM denoland/deno:2.9.7
 
 WORKDIR /app
 ENV DENO_DIR=/app/.deno
+ENV SELF_HOSTED=1
+ENV USAGE_ENFORCEMENT_DISABLED=true
 
 # Server source (unmodified) + provisioning CLI.
 COPY supabase/functions/mcp-server/ ./mcp-server/

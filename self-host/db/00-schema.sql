@@ -111,10 +111,14 @@ CREATE TABLE public.inboxes (
   imap_host               text,
   imap_port               integer,
   imap_tls                boolean NOT NULL DEFAULT true,
+  imap_security           text NOT NULL DEFAULT 'tls'
+                            CHECK (imap_security IN ('tls', 'starttls')),
   imap_username           text,                             -- COALESCE(imap_username, email_address)
   smtp_host               text,
   smtp_port               integer,
   smtp_tls                boolean NOT NULL DEFAULT true,
+  smtp_security           text NOT NULL DEFAULT 'tls'
+                            CHECK (smtp_security IN ('tls', 'starttls')),
   imap_password           bytea,
   -- Per-inbox signature (plaintext; not secret)
   signature_html          text,
@@ -124,6 +128,7 @@ CREATE TABLE public.inboxes (
                             CHECK (signature_reply_mode IN ('always', 'first_only', 'never')),
   signature_source        text CHECK (signature_source IS NULL OR signature_source IN ('manual', 'gmail_import')),
   signature_updated_at    timestamptz,
+  send_approval_required  boolean NOT NULL DEFAULT false,
   -- Connection state
   status                  text NOT NULL DEFAULT 'pending',  -- 'pending' | 'active' | 'error' | 'revoked'
   last_sync_at            timestamptz,
@@ -159,10 +164,11 @@ CREATE TABLE public.api_keys (
   key_hash      text NOT NULL UNIQUE, -- SHA-256 hex of the full key
   scopes        text[] NOT NULL DEFAULT '{}',
   inbox_ids     uuid[],               -- null = all inboxes; array = restrict
-  expires_at    timestamptz,
-  last_used_at  timestamptz,
-  deleted_at    timestamptz,
-  created_at    timestamptz NOT NULL DEFAULT now(),
+  expires_at           timestamptz,
+  last_used_at         timestamptz,
+  card_build_notified  text,
+  deleted_at           timestamptz,
+  created_at           timestamptz NOT NULL DEFAULT now(),
   updated_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_api_keys_workspace_id_active ON public.api_keys (workspace_id) WHERE deleted_at IS NULL;
@@ -170,6 +176,43 @@ CREATE INDEX idx_api_keys_key_prefix          ON public.api_keys (key_prefix);
 CREATE TRIGGER api_keys_updated_at
   BEFORE UPDATE ON public.api_keys
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ============================================================
+-- TABLE: outbound_idempotency
+-- Retry-safe sends and mailbox mutations. Stores only keyed HMAC digests,
+-- state, and a small allow-listed result snapshot; never message bodies,
+-- recipients, subjects, or attachments.
+-- ============================================================
+CREATE TABLE public.outbound_idempotency (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  api_key_id      uuid NOT NULL REFERENCES public.api_keys(id) ON DELETE CASCADE,
+  operation       text NOT NULL CHECK (operation IN (
+    'email_send', 'email_reply', 'email_forward', 'draft_send', 'schedule_create',
+    'email_move', 'email_copy', 'email_move_batch', 'email_copy_batch',
+    'email_delete', 'email_delete_batch', 'email_flag', 'email_archive',
+    'email_search_and_move', 'email_search_and_delete',
+    'draft_create', 'draft_reply', 'draft_update', 'draft_delete'
+  )),
+  key_digest      text NOT NULL,
+  request_digest  text NOT NULL,
+  status          text NOT NULL DEFAULT 'processing'
+                    CHECK (status IN ('processing', 'pending_approval', 'succeeded', 'failed', 'unknown')),
+  approval_id     uuid,
+  result_snapshot jsonb,
+  completed_at    timestamptz,
+  expires_at      timestamptz NOT NULL DEFAULT (now() + interval '24 hours'),
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (api_key_id, operation, key_digest)
+);
+CREATE INDEX outbound_idempotency_expires_at_idx
+  ON public.outbound_idempotency (expires_at);
+CREATE INDEX outbound_idempotency_approval_id_idx
+  ON public.outbound_idempotency (approval_id) WHERE approval_id IS NOT NULL;
+CREATE TRIGGER outbound_idempotency_updated_at
+  BEFORE UPDATE ON public.outbound_idempotency
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+ALTER TABLE public.outbound_idempotency ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================
 -- TABLE: activity_log  (append-only tool-call log)
