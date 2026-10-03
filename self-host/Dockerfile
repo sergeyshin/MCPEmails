@@ -1,7 +1,7 @@
 # MCP Emails, compact Railway self-host image.
 # One Railway service runs both the public Deno MCP server and a localhost-only
 # PostgREST process. PostgreSQL remains the only separate persistent service.
-FROM postgrest/postgrest:v12.2.3 AS postgrest
+FROM postgrest/postgrest:v12.2.12 AS postgrest
 
 FROM denoland/deno:2.9.7
 
