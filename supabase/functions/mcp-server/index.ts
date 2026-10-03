@@ -9274,8 +9274,22 @@ async function decryptStoredToken(encrypted: string): Promise<string> {
     ["decrypt"],
   );
 
+  // PostgREST serializes PostgreSQL bytea columns as "\\x<hex>".
+  // The self-host CLI writes the base64url ciphertext string into bytea, so
+  // unwrap that PostgreSQL hex representation back to the original string
+  // before applying the normal base64url decoder.
+  let encoded = encrypted;
+  if (/^\\x[0-9a-f]+$/i.test(encoded)) {
+    const hex = encoded.slice(2);
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    }
+    encoded = new TextDecoder().decode(bytes);
+  }
+
   // base64url → Uint8Array
-  const b64 = encrypted.replace(/-/g, "+").replace(/_/g, "/");
+  const b64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
   const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
   const binaryStr = atob(padded);
   const raw = new Uint8Array(binaryStr.length);
