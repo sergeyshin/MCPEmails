@@ -495,6 +495,28 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey, {
     fetch: (input: RequestInfo | URL, init?: RequestInit) => {
       const meter = requestMeterStore.getStore();
       if (meter) meter.dbCalls += 1;
+
+      // supabase-js always targets <SUPABASE_URL>/rest/v1/*. In the compact
+      // self-host image PostgREST is reached directly on loopback, without the
+      // old nginx gateway that stripped this prefix. Rewrite only same-origin
+      // self-host requests; hosted/Supabase deployments are unchanged.
+      if (SELF_HOSTED) {
+        const raw = input instanceof Request
+          ? input.url
+          : input instanceof URL
+          ? input.toString()
+          : input;
+        const url = new URL(raw);
+        const base = new URL(supabaseUrl);
+        if (url.origin === base.origin && url.pathname.startsWith("/rest/v1/")) {
+          url.pathname = url.pathname.slice("/rest/v1".length);
+          if (input instanceof Request) {
+            return fetch(new Request(url, input), init);
+          }
+          return fetch(url, init);
+        }
+      }
+
       return fetch(input, init);
     },
   },

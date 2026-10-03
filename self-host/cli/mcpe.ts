@@ -149,7 +149,28 @@ async function getClient() {
   const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!url || !key) die("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set (start the stack, then use `make`).");
   const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2.117.2");
-  return createClient(url, key, { auth: { persistSession: false } });
+  return createClient(url, key, {
+    auth: { persistSession: false },
+    global: {
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+        const raw = input instanceof Request
+          ? input.url
+          : input instanceof URL
+          ? input.toString()
+          : input;
+        const target = new URL(raw);
+        const base = new URL(url);
+        if (target.origin === base.origin && target.pathname.startsWith("/rest/v1/")) {
+          target.pathname = target.pathname.slice("/rest/v1".length);
+          if (input instanceof Request) {
+            return fetch(new Request(target, input), init);
+          }
+          return fetch(target, init);
+        }
+        return fetch(input, init);
+      },
+    },
+  });
 }
 
 // ── commands ─────────────────────────────────────────────────────────────────
