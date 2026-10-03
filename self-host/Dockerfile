@@ -1,11 +1,8 @@
-# MCP Emails, self-host server image.
-#
-# Runs the exact same Deno MCP server that powers mcpemails.com
-# (supabase/functions/mcp-server), plus the provisioning CLI. No build step or
-# bundler: the server is plain Deno and talks to PostgREST over HTTP.
-#
-# Build context is the repo root (see docker-compose.yml) so we can copy both
-# the server source and the self-host CLI.
+# MCP Emails, compact Railway self-host image.
+# One Railway service runs both the public Deno MCP server and a localhost-only
+# PostgREST process. PostgreSQL remains the only separate persistent service.
+FROM postgrest/postgrest:v12.2.3 AS postgrest
+
 FROM denoland/deno:2.9.7
 
 WORKDIR /app
@@ -13,22 +10,17 @@ ENV DENO_DIR=/app/.deno
 ENV SELF_HOSTED=1
 ENV USAGE_ENFORCEMENT_DISABLED=true
 
-# Server source (unmodified) + provisioning CLI.
+COPY --from=postgrest /bin/postgrest /usr/local/bin/postgrest
 COPY supabase/functions/mcp-server/ ./mcp-server/
 COPY self-host/cli/ ./cli/
 COPY self-host/deno.lock ./deno.lock
+COPY self-host/railway-entrypoint.sh ./railway-entrypoint.sh
 
-# Pre-cache the exact dependency graph recorded by the pinned source revision.
-# Keep the cache writable by the non-root runtime user, but forbid runtime
-# dependency resolution outside this frozen graph.
 RUN mkdir -p "$DENO_DIR" \
     && deno cache --node-modules-dir=none --lock=deno.lock --frozen mcp-server/index.ts ./cli/mcpe.ts \
-    && chown -R deno:deno "$DENO_DIR"
+    && chown -R deno:deno "$DENO_DIR" /app/railway-entrypoint.sh \
+    && chmod 0555 /app/railway-entrypoint.sh /usr/local/bin/postgrest
 
-# Drop root.
 USER deno
-
 EXPOSE 8000
-
-# Deno.serve(handleRequest) binds 0.0.0.0:8000 by default.
-CMD ["deno", "run", "--cached-only", "--node-modules-dir=none", "--lock=deno.lock", "--frozen", "--allow-net", "--allow-env", "mcp-server/index.ts"]
+CMD ["/app/railway-entrypoint.sh"]
